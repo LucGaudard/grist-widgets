@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Planning des séances V3.6</title><script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<style>
+:root{font-family:system-ui,-apple-system,sans-serif;color-scheme:light dark}*{box-sizing:border-box}body{margin:0;background:Canvas;color:CanvasText}header{position:sticky;top:0;z-index:2;background:Canvas;border-bottom:1px solid #9995;padding:12px;display:flex;gap:8px;align-items:center;justify-content:space-between}button{cursor:pointer;border:1px solid #9996;background:Canvas;color:CanvasText;border-radius:8px;padding:7px 10px}#month{font-weight:700;text-transform:capitalize}main{padding:8px 12px 28px;max-width:920px;margin:auto}.day{display:grid;grid-template-columns:75px 1fr;gap:10px;border-bottom:1px solid #9993;padding:18px 0}.day{scroll-margin-top:64px}.date{position:sticky;top:62px;align-self:start;font-size:13px;color:GrayText;text-transform:uppercase}.date strong{display:block;font-size:27px;color:CanvasText}.events{display:grid;gap:8px}.event{border:0;border-left:5px solid var(--accent);background:var(--bg);color:#1d2733;text-align:left;padding:12px 14px;border-radius:7px;width:100%}.event strong{display:block;font-size:15px;margin:4px 0}.event-top{display:flex;align-items:center;justify-content:space-between;gap:8px}.event-group{font-size:11px;font-weight:650;padding:3px 7px;border-radius:5px;background:#ffffffa8;color:#1d2733;white-space:nowrap;max-width:55%;overflow:hidden;text-overflow:ellipsis}.event-group:empty{display:none}.event small{font-size:12px}.event.selected{outline:2px solid #2767ce;outline-offset:2px}#message{padding:25px;text-align:center;color:GrayText}.muted{color:GrayText;font-size:12px}@media(max-width:450px){.day{grid-template-columns:55px 1fr}.date strong{font-size:24px}header{padding:9px}}
+
+.event-card{border-left:5px solid var(--accent);background:var(--bg);color:var(--fg,#1d2733);border-radius:7px;overflow:hidden}
+.event-card .event{background:transparent;border:0;border-radius:0;color:inherit}
+.event-card .event.selected{outline:2px solid #2767ce;outline-offset:-2px}
+.event-details{border-top:1px solid #0002;padding:0 12px 10px}
+.event-details summary{cursor:pointer;font-size:12px;font-weight:650;padding:10px 2px;list-style-position:inside}
+.event-details[open] summary{margin-bottom:4px}
+.md-content{background:#ffffffdb;color:#1d2733;border-radius:6px;padding:9px 11px;overflow-wrap:anywhere;font-size:13px;line-height:1.5}
+.md-content p{margin:0 0 8px}.md-content p:last-child{margin-bottom:0}.md-content ul,.md-content ol{padding-left:20px;margin:5px 0}.md-content a{color:#1452a0}.md-content pre{overflow:auto}.md-content img{max-width:100%;height:auto}
+.event-details .section-title{font-size:12px;font-weight:700;margin:9px 0 5px}
+.event-details .empty{font-size:12px;opacity:.75}
+</style></head><body><header><button id="prev" aria-label="Mois précédent">‹</button><span id="month"></span><button id="next" aria-label="Mois suivant">›</button><button id="today">Aujourd'hui</button></header><main id="list"></main><div id="message"></div>
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+<script>
+'use strict';
+const F={start:'Date_debut',end:'Date_fin',title:'Libelle_calendrier',type:'Cours_Type'};
+let records=[],selected=null,anchor=new Date();anchor.setDate(1);anchor.setHours(0,0,0,0);
+const fmtTime=new Intl.DateTimeFormat('fr-FR',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Paris'});
+const fmtMonth=new Intl.DateTimeFormat('fr-FR',{month:'long',year:'numeric',timeZone:'Europe/Paris'});
+const fmtDay=new Intl.DateTimeFormat('fr-FR',{weekday:'short',timeZone:'Europe/Paris'});
+const fmtKey=new Intl.DateTimeFormat('en-CA',{year:'numeric',month:'2-digit',day:'2-digit',timeZone:'Europe/Paris'});
+let categoryColors={}, courseCategories={};
+let colorError='';
+const fallback=['#697586','#e9edf2'];
+function tableRows(data){if(Array.isArray(data))return data;const ids=data?.id||[];return ids.map((id,i)=>Object.fromEntries(Object.entries(data).map(([k,v])=>[k,Array.isArray(v)?v[i]:v]).concat([['id',id]])))}
+async function loadCategoryColors(){
+ const issues=[];
+ let tables,columns,courses;
+ for(const [name,fetch] of [
+  ['Cours',()=>grist.docApi.fetchTable('Cours')],
+  ['_grist_Tables',()=>grist.docApi.fetchTable('_grist_Tables')],
+  ['_grist_Tables_column',()=>grist.docApi.fetchTable('_grist_Tables_column')]
+ ]){
+  try{
+   const data=await fetch();
+   if(name==='Cours')courses=data;
+   else if(name==='_grist_Tables')tables=data;
+   else columns=data;
+   console.info('[Planning V3.6] Table lue :',name,'lignes :',tableRows(data).length);
+  }catch(e){issues.push(name+' : '+(e?.message||String(e)));console.error('[Planning V3.6] Lecture impossible :',name,e)}
+ }
+ if(courses){
+  const rows=tableRows(courses);
+  courseCategories=Object.fromEntries(rows.map(c=>[Number(c.id),String(c.CatCours||'')]));
+  console.info('[Planning V3.6] Catégories de cours :',Object.keys(courseCategories).length);
+ }
+ if(tables&&columns){
+  const table=tableRows(tables).find(t=>t.tableId==='Cours');
+  const col=tableRows(columns).find(c=>Number(c.parentId)===Number(table?.id)&&c.colId==='CatCours');
+  if(!table)issues.push('Table Cours absente des métadonnées');
+  else if(!col)issues.push('Colonne Cours.CatCours absente des métadonnées');
+  else{
+   try{
+    const opts=JSON.parse(col.widgetOptions||'{}').choiceOptions||{};
+    categoryColors=Object.fromEntries(Object.entries(opts).filter(([,style])=>style?.fillColor).map(([name,style])=>[name,style.fillColor]));
+    console.info('[Planning V3.6] Couleurs récupérées :',categoryColors);
+    if(!Object.keys(categoryColors).length)issues.push('Aucune couleur trouvée dans Cours.CatCours.choiceOptions');
+   }catch(e){issues.push('Analyse widgetOptions : '+e.message)}
+  }
+ }
+ colorError=issues.join(' | ');
+ render();
+}
+function categoryFor(r){const ref=r.Cours;const id=typeof ref==='number'?ref:Number(ref);return courseCategories[id]||''}
+function groupFor(r){return String(r.Groupe_sans_vague||'')}
+function contrast(hex){const h=hex.replace('#','');if(!/^[0-9a-f]{6}$/i.test(h))return '#1d2733';const rgb=[0,2,4].map(i=>parseInt(h.slice(i,i+2),16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722>.45?'#1d2733':'#fff'}
+function asDate(v){if(v==null||v==='')return null;if(v instanceof Date)return Number.isNaN(+v)?null:v;if(typeof v==='number')return new Date(v*1000);const d=new Date(v);return Number.isNaN(+d)?null:d}
+function monthKey(d){return fmtKey.format(d).slice(0,7)}
+function field(r,...keys){for(const key of keys){if(r[key]!==undefined&&r[key]!==null)return String(r[key])}return ''}
+function addMarkdown(target,markdown){
+ const text=String(markdown||'').trim();
+ if(!text){const e=document.createElement('div');e.className='empty';e.textContent='Non renseigné';target.append(e);return}
+ const content=document.createElement('div');content.className='md-content';
+ if(window.marked&&window.DOMPurify){
+  const raw=window.marked.parse(text,{gfm:true,breaks:true});
+  content.innerHTML=window.DOMPurify.sanitize(raw);
+  content.querySelectorAll('a').forEach(a=>{a.target='_blank';a.rel='noopener noreferrer'});
+ }else{content.textContent=text;content.style.whiteSpace='pre-wrap'}
+ target.append(content);
+}
+function render(){
+ document.getElementById('month').textContent=fmtMonth.format(anchor);
+ const list=document.getElementById('list');list.replaceChildren();
+ const valid=records.map(r=>({...r,_start:asDate(r[F.start]),_end:asDate(r[F.end])}))
+  .filter(r=>r._start&&r._start>=new Date(anchor.getFullYear(),anchor.getMonth()-1,1)&&r._start<new Date(anchor.getFullYear(),anchor.getMonth()+2,1))
+  .sort((a,b)=>a._start-b._start);
+ const groups=new Map();for(const r of valid){const k=fmtKey.format(r._start);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(r)}
+ for(const [key,items] of groups){
+  const day=document.createElement('section');day.className='day';day.dataset.date=key;
+  const date=document.createElement('div');date.className='date';date.textContent=fmtDay.format(items[0]._start);
+  const num=document.createElement('strong');num.textContent=key.slice(-2);date.append(num);day.append(date);
+  const events=document.createElement('div');events.className='events';
+  for(const r of items){
+   const card=document.createElement('article');card.className='event-card';
+   const btn=document.createElement('button');btn.type='button';btn.className='event'+(r.id===selected?' selected':'');btn.dataset.rowid=String(r.id);
+   const t=String(r[F.type]||'Autre');const cat=categoryFor(r);const bg=categoryColors[cat]||fallback[1];
+   card.style.setProperty('--accent',bg);card.style.setProperty('--bg',bg);card.style.setProperty('--fg',contrast(bg));
+   const time=document.createElement('small');time.textContent=fmtTime.format(r._start)+(r._end?' – '+fmtTime.format(r._end):'');
+   const top=document.createElement('div');top.className='event-top';
+   const group=document.createElement('span');group.className='event-group';group.textContent=groupFor(r);if(group.textContent)group.title=group.textContent;
+   top.append(time,group);const title=document.createElement('strong');title.textContent=String(r[F.title]||'Séance sans titre');
+   const typ=document.createElement('small');typ.textContent=cat?cat+' · '+t:t;
+   btn.append(top,title,typ);
+   btn.onclick=()=>{selected=r.id;document.querySelectorAll('.event.selected').forEach(e=>e.classList.remove('selected'));btn.classList.add('selected');grist.setCursorPos({rowId:r.id}).catch(e=>console.error('Sélection Grist impossible',e))};
+   card.append(btn);
+   const ressources=field(r,'Ressources_associees');const prerequis=field(r,'Prerequis');
+   if(ressources.trim()||prerequis.trim()){
+    const details=document.createElement('details');details.className='event-details';
+    const summary=document.createElement('summary');summary.textContent='Ressources et prérequis';details.append(summary);
+    for(const [name,value] of [['Ressources associées',ressources],['Prérequis',prerequis]]){
+     if(!value.trim())continue;
+     const heading=document.createElement('div');heading.className='section-title';heading.textContent=name;details.append(heading);
+     addMarkdown(details,value);
+    }
+    card.append(details);
+   }
+   events.append(card);
+  }
+  day.append(events);list.append(day);
+ }
+ document.getElementById('message').textContent=groups.size?'':'Aucune séance prévue sur cette période.';
+}
+document.getElementById('prev').onclick=()=>{anchor.setMonth(anchor.getMonth()-1);render()};document.getElementById('next').onclick=()=>{anchor.setMonth(anchor.getMonth()+1);render()};function jumpToday(){const now=new Date();anchor=new Date(now.getFullYear(),now.getMonth(),1);render();const today=fmtKey.format(now);const days=[...document.querySelectorAll('.day')];const target=days.find(el=>el.dataset.date>=today);if(target){target.scrollIntoView({block:'start',behavior:'smooth'});}else{document.getElementById('message').textContent='Aucune séance à venir sur cette période.';}}
+document.getElementById('today').onclick=jumpToday;
+grist.ready({requiredAccess:'full',allowSelectBy:true});
+grist.onRecords(data=>{records=Array.isArray(data)?data:tableRows(data);render()});
+grist.onRecord(r=>{if(r&&r.id!=null){selected=r.id;document.querySelectorAll('.event').forEach(el=>el.classList.remove('selected'));const found=records.find(x=>x.id===selected);if(found){const buttons=[...document.querySelectorAll('.event')];const matching=buttons.find(el=>el.dataset.rowid===String(selected));if(matching)matching.classList.add('selected');}}});
+render();
+loadCategoryColors();
+</script></body></html>
