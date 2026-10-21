@@ -114,10 +114,11 @@ function addMarkdown(target,markdown){
  target.append(content);
 }
 function render(){
- document.getElementById('month').textContent=fmtMonth.format(anchor);
+ const monthLabel=fmtMonth.format(anchor);
+ document.getElementById('month').textContent=monthLabel.charAt(0).toLocaleUpperCase('fr-FR')+monthLabel.slice(1);
  const list=document.getElementById('list');list.replaceChildren();
  const valid=records.map(r=>({...r,_start:asDate(r[F.start]),_end:asDate(r[F.end])}))
-  .filter(r=>r._start&&r._start>=new Date(anchor.getFullYear(),anchor.getMonth()-1,1)&&r._start<new Date(anchor.getFullYear(),anchor.getMonth()+2,1))
+  .filter(r=>r._start&&r._start>=new Date(anchor.getFullYear(),anchor.getMonth(),1)&&r._start<new Date(anchor.getFullYear(),anchor.getMonth()+1,1))
   .sort((a,b)=>a._start-b._start);
  const groups=new Map();for(const r of valid){const k=fmtKey.format(r._start);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(r)}
  for(const [key,items] of groups){
