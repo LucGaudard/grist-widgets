@@ -35,6 +35,7 @@ const fmtMonth=new Intl.DateTimeFormat('fr-FR',{month:'long',year:'numeric',time
 const fmtDay=new Intl.DateTimeFormat('fr-FR',{weekday:'short',timeZone:'Europe/Paris'});
 const fmtKey=new Intl.DateTimeFormat('en-CA',{year:'numeric',month:'2-digit',day:'2-digit',timeZone:'Europe/Paris'});
 let categoryColors={}, courseCategories={}, sessionDetails=new Map();
+let coursesById=new Map(), categoriesById=new Map();
 let colorError='';
 const fallback=['#697586','#e9edf2'];
 function tableRows(data){if(Array.isArray(data))return data;const ids=data?.id||[];return ids.map((id,i)=>Object.fromEntries(Object.entries(data).map(([k,v])=>[k,Array.isArray(v)?v[i]:v]).concat([['id',id]])))}
@@ -57,26 +58,21 @@ async function loadCategoryColors(){
    sessionDetails.get(key).push(row);
   }
  }
- const byId=new Map(),byName=new Map();
+ categoriesById=new Map();
  if(categories){
   for(const row of tableRows(categories)){
    const color=String(row.Couleur||'').trim();
-   if(!/^#[0-9a-f]{6}$/i.test(color))continue;
-   byId.set(Number(row.id),color);
-   for(const name of [row.Cat,row.Categorie]){
-    if(name!=null&&String(name).trim())byName.set(String(name).trim(),color);
-   }
+   if(/^#[0-9a-f]{6}$/i.test(color))categoriesById.set(Number(row.id),color);
   }
-  if(!byId.size)issues.push('Aucune couleur hexadécimale valide dans Cours_Categories.Couleur');
+  if(!categoriesById.size)issues.push('Aucune couleur hexadécimale valide dans Cours_Categories.Couleur');
  }
- categoryColors={};courseCategories={};
+ categoryColors={};courseCategories={};coursesById=new Map();
  if(courses){
   for(const course of tableRows(courses)){
-   const catName=String(course.CatCours||'').trim();
-   const categoryRef=Number(course.Categorie_Cours);
-   const color=(Number.isInteger(categoryRef)?byId.get(categoryRef):null)||byName.get(catName);
-   courseCategories[Number(course.id)]=catName;
-   if(color)categoryColors[Number(course.id)]=color;
+   const id=Number(course.id), categoryId=Number(course.Categorie_Cours);
+   coursesById.set(id,course);
+   const color=categoriesById.get(categoryId);
+   if(color)categoryColors[id]=color;
   }
  }
  colorError=issues.join(' | ');
@@ -91,15 +87,21 @@ function enrichment(r){
  // Pas d'association ambiguë entre une synthèse et plusieurs séances sources.
  return matches.length===1?matches[0]:null;
 }
-function categoryFor(r){
- // Le cours est fourni directement par la source du widget (table ou synthèse).
- // Ne jamais rapprocher les séances par date/libellé pour déterminer la couleur.
- const ref=r.Cours;
- if(ref===null||ref===undefined||ref==='')return '';
- // Une synthèse peut fournir une liste : colorer seulement si elle désigne un cours unique.
+function refIds(ref){
+ if(ref==null||ref==='')return [];
  const values=Array.isArray(ref)?(ref[0]==='L'?ref.slice(1):ref):[ref];
- const ids=[...new Set(values.map(v=>Number(v)).filter(Number.isInteger))];
- return ids.length===1?ids[0]:null;
+ return [...new Set(values.map(v=>Number(v)).filter(v=>Number.isInteger(v)&&v>0))];
+}
+function colorFor(r){
+ // Une synthèse peut contenir plusieurs cours. Une couleur n'est appliquée
+ // que lorsque tous les cours sont connus et partagent la même catégorie.
+ const ids=refIds(r.Cours);
+ if(!ids.length)return {color:null,label:''};
+ const cats=ids.map(id=>Number(coursesById.get(id)?.Categorie_Cours));
+ if(cats.some(id=>!Number.isInteger(id)||id<=0))return {color:null,label:''};
+ const unique=[...new Set(cats)];
+ if(unique.length!==1)return {color:null,label:''};
+ return {color:categoriesById.get(unique[0])||null,label:''};
 }
 function groupFor(r){return String(r.Groupe_sans_vague||enrichment(r)?.Groupe_sans_vague||'')}
 function contrast(hex){const h=hex.replace('#','');if(!/^[0-9a-f]{6}$/i.test(h))return '#1d2733';const rgb=[0,2,4].map(i=>parseInt(h.slice(i,i+2),16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722>.45?'#1d2733':'#fff'}
@@ -133,13 +135,13 @@ function render(){
   for(const r of items){
    const card=document.createElement('article');card.className='event-card';
    const btn=document.createElement('button');btn.type='button';btn.className='event'+(r.id===selected?' selected':'');btn.dataset.rowid=String(r.id);
-   const t=String(r[F.type]||enrichment(r)?.[F.type]||'Autre');const cat=categoryFor(r);const bg=categoryColors[cat]||fallback[1];
+   const t=String(r[F.type]||enrichment(r)?.[F.type]||'Autre');const category=colorFor(r);const bg=category.color||fallback[1];
    card.style.setProperty('--accent',bg);card.style.setProperty('--bg',bg);card.style.setProperty('--fg',contrast(bg));
    const time=document.createElement('small');time.textContent=fmtTime.format(r._start)+(r._end?' – '+fmtTime.format(r._end):'');
    const top=document.createElement('div');top.className='event-top';
    const group=document.createElement('span');group.className='event-group';group.textContent=groupFor(r);if(group.textContent)group.title=group.textContent;
    top.append(time,group);const title=document.createElement('strong');title.textContent=String(r[F.title]||'Séance sans titre');
-   const typ=document.createElement('small');typ.textContent=cat&&courseCategories[cat]?courseCategories[cat]+' · '+t:t;
+   const typ=document.createElement('small');typ.textContent=t;
    btn.append(top,title,typ);
    btn.onclick=()=>{selected=r.id;document.querySelectorAll('.event.selected').forEach(e=>e.classList.remove('selected'));btn.classList.add('selected');grist.setCursorPos({rowId:r.id}).catch(e=>console.error('Sélection Grist impossible',e))};
    const mainRow=document.createElement('div');mainRow.className='event-main';mainRow.append(btn);
