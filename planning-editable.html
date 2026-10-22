@@ -43,60 +43,42 @@ const fmtTime=new Intl.DateTimeFormat('fr-FR',{hour:'2-digit',minute:'2-digit',t
 const fmtMonth=new Intl.DateTimeFormat('fr-FR',{month:'long',year:'numeric',timeZone:'Europe/Paris'});
 const fmtDay=new Intl.DateTimeFormat('fr-FR',{weekday:'short',timeZone:'Europe/Paris'});
 const fmtKey=new Intl.DateTimeFormat('en-CA',{year:'numeric',month:'2-digit',day:'2-digit',timeZone:'Europe/Paris'});
-let categoryColors={}, courseCategories={}, sessionDetails=new Map();
+let sessionDetails=new Map(), sessionsByReference=new Map();
 let colorError='';
 let summaryGroups=new Map(),sourceRows=new Map(),editorRow=null,editorSourceId=null;
 const fallback=['#697586','#e9edf2'];
 function tableRows(data){if(Array.isArray(data))return data;const ids=data?.id||[];return ids.map((id,i)=>Object.fromEntries(Object.entries(data).map(([k,v])=>[k,Array.isArray(v)?v[i]:v]).concat([['id',id]])))}
+function unwrapText(value){
+ if(value==null)return '';
+ let text=String(value).trim();
+ for(let i=0;i<2;i++){
+  if(!(text.startsWith('"')&&text.endsWith('"')))break;
+  try{const parsed=JSON.parse(text);if(typeof parsed!=='string')break;text=parsed.trim()}catch(e){break}
+ }
+ return text;
+}
+function validColor(value){const color=unwrapText(value);return /^#[0-9a-f]{6}$/i.test(color)?color:null}
 async function loadCategoryColors(){
- const issues=[];
- let tables,columns,courses,sessions;
- for(const [name,fetch] of [
-  ['Cours',()=>grist.docApi.fetchTable('Cours')],
-  ['Seances',()=>grist.docApi.fetchTable('Seances')],
-  ['_grist_Tables',()=>grist.docApi.fetchTable('_grist_Tables')],
-  ['_grist_Tables_column',()=>grist.docApi.fetchTable('_grist_Tables_column')]
- ]){
-  try{
-   const data=await fetch();
-   if(name==='Cours')courses=data;
-   else if(name==='Seances')sessions=data;
-   else if(name==='_grist_Tables')tables=data;
-   else columns=data;
-   console.info('[Planning V3.8] Table lue :',name,'lignes :',tableRows(data).length);
-  }catch(e){issues.push(name+' : '+(e?.message||String(e)));console.error('[Planning V3.8] Lecture impossible :',name,e)}
- }
- if(sessions){
-  sourceRows=new Map(tableRows(sessions).map(row=>[Number(row.id),row]));
-  // Enrichissement uniquement : les cartes restent exclusivement celles de grist.onRecords.
+ try{
+  const sessions=tableRows(await grist.docApi.fetchTable('Seances'));
+  sessionsByReference=new Map();
   sessionDetails=new Map();
-  for(const row of tableRows(sessions)){
-   const key=signature(row);
-   if(!sessionDetails.has(key))sessionDetails.set(key,[]);
-   sessionDetails.get(key).push(row);
+  for(const row of sessions){
+   const ref=unwrapText(row.Reference);
+   if(ref){if(!sessionsByReference.has(ref))sessionsByReference.set(ref,[]);sessionsByReference.get(ref).push(row)}
+   const sig=signature(row);
+   if(!sessionDetails.has(sig))sessionDetails.set(sig,[]);
+   sessionDetails.get(sig).push(row);
   }
- }
- if(courses){
-  const rows=tableRows(courses);
-  courseCategories=Object.fromEntries(rows.map(c=>[Number(c.id),String(c.CatCours||'')]));
-  console.info('[Planning V3.8] Catégories de cours :',Object.keys(courseCategories).length);
- }
- if(tables&&columns){
-  const table=tableRows(tables).find(t=>t.tableId==='Cours');
-  const col=tableRows(columns).find(c=>Number(c.parentId)===Number(table?.id)&&c.colId==='CatCours');
-  if(!table)issues.push('Table Cours absente des métadonnées');
-  else if(!col)issues.push('Colonne Cours.CatCours absente des métadonnées');
-  else{
-   try{
-    const opts=JSON.parse(col.widgetOptions||'{}').choiceOptions||{};
-    categoryColors=Object.fromEntries(Object.entries(opts).filter(([,style])=>style?.fillColor).map(([name,style])=>[name,style.fillColor]));
-    console.info('[Planning V3.8] Couleurs récupérées :',categoryColors);
-    if(!Object.keys(categoryColors).length)issues.push('Aucune couleur trouvée dans Cours.CatCours.choiceOptions');
-   }catch(e){issues.push('Analyse widgetOptions : '+e.message)}
-  }
- }
- colorError=issues.join(' | ');
+  sourceRows=new Map(sessions.map(row=>[Number(row.id),row]));
+ }catch(e){console.error('[Planning] Lecture Seances impossible :',e)}
  render();
+}
+function colorFor(r){
+ const direct=validColor(r.Cours_CatCours);
+ if(direct)return direct;
+ const matches=sessionsByReference.get(unwrapText(r.Reference))||[];
+ return matches.length===1?validColor(matches[0].Cours_CatCours):null;
 }
 function signature(r){
  const start=asDate(r.Date_debut), end=asDate(r.Date_fin);
@@ -106,16 +88,6 @@ function enrichment(r){
  const matches=sessionDetails.get(signature(r))||[];
  // Pas d'association ambiguë entre une synthèse et plusieurs séances sources.
  return matches.length===1?matches[0]:null;
-}
-function categoryFor(r){
- // Le cours est fourni directement par la source du widget (table ou synthèse).
- // Ne jamais rapprocher les séances par date/libellé pour déterminer la couleur.
- const ref=r.Cours;
- if(ref===null||ref===undefined||ref==='')return '';
- // Une synthèse peut fournir une liste : colorer seulement si elle désigne un cours unique.
- const values=Array.isArray(ref)?(ref[0]==='L'?ref.slice(1):ref):[ref];
- const ids=[...new Set(values.map(v=>Number(v)).filter(Number.isInteger))];
- return ids.length===1?(courseCategories[ids[0]]||''):'';
 }
 function groupFor(r){return String(r.Groupe_sans_vague||enrichment(r)?.Groupe_sans_vague||'')}
 function contrast(hex){const h=hex.replace('#','');if(!/^[0-9a-f]{6}$/i.test(h))return '#1d2733';const rgb=[0,2,4].map(i=>parseInt(h.slice(i,i+2),16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722>.45?'#1d2733':'#fff'}
@@ -203,13 +175,13 @@ function render(){
   for(const r of items){
    const card=document.createElement('article');card.className='event-card';
    const btn=document.createElement('button');btn.type='button';btn.className='event'+(r.id===selected?' selected':'');btn.dataset.rowid=String(r.id);
-   const t=String(r[F.type]||enrichment(r)?.[F.type]||'Autre');const cat=categoryFor(r);const bg=categoryColors[cat]||fallback[1];
+   const t=String(r[F.type]||enrichment(r)?.[F.type]||'Autre');const bg=colorFor(r)||fallback[1];
    card.style.setProperty('--accent',bg);card.style.setProperty('--bg',bg);card.style.setProperty('--fg',contrast(bg));
    const time=document.createElement('small');time.textContent=fmtTime.format(r._start)+(r._end?' – '+fmtTime.format(r._end):'');
    const top=document.createElement('div');top.className='event-top';
    const group=document.createElement('span');group.className='event-group';group.textContent=groupFor(r);if(group.textContent)group.title=group.textContent;
    top.append(time,group);const title=document.createElement('strong');title.textContent=String(r[F.title]||'Séance sans titre');
-   const typ=document.createElement('small');typ.textContent=cat?cat+' · '+t:t;
+   const typ=document.createElement('small');typ.textContent=t;
    btn.append(top,title,typ);
    btn.onclick=()=>{selected=r.id;document.querySelectorAll('.event.selected').forEach(e=>e.classList.remove('selected'));btn.classList.add('selected');grist.setCursorPos({rowId:r.id}).catch(e=>console.error('Sélection Grist impossible',e))};
    const mainRow=document.createElement('div');mainRow.className='event-main';mainRow.append(btn);

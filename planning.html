@@ -34,33 +34,49 @@ const fmtTime=new Intl.DateTimeFormat('fr-FR',{hour:'2-digit',minute:'2-digit',t
 const fmtMonth=new Intl.DateTimeFormat('fr-FR',{month:'long',year:'numeric',timeZone:'Europe/Paris'});
 const fmtDay=new Intl.DateTimeFormat('fr-FR',{weekday:'short',timeZone:'Europe/Paris'});
 const fmtKey=new Intl.DateTimeFormat('en-CA',{year:'numeric',month:'2-digit',day:'2-digit',timeZone:'Europe/Paris'});
-let sessionsByReference=new Map();
+let sessionDetails=new Map(), sessionsByReference=new Map();
+let colorError='';
 const fallback=['#697586','#e9edf2'];
 function tableRows(data){if(Array.isArray(data))return data;const ids=data?.id||[];return ids.map((id,i)=>Object.fromEntries(Object.entries(data).map(([k,v])=>[k,Array.isArray(v)?v[i]:v]).concat([['id',id]])))}
-function validColor(v){const color=String(v??'').trim();return /^#[0-9a-f]{6}$/i.test(color)?color:null}
-async function loadCategoryColors(){
- // La table de synthèse peut exposer Cours_CatCours directement.
- // Sinon, Reference identifie sans ambiguïté la séance source.
- try{
-  const data=await grist.docApi.fetchTable('Seances');
-  sessionsByReference=new Map();
-  for(const session of tableRows(data)){
-   const key=String(session.Reference??'').trim();
-   if(key){if(!sessionsByReference.has(key))sessionsByReference.set(key,[]);sessionsByReference.get(key).push(session)}
-  }
-  console.info('[Planning couleurs] Séances indexées :',sessionsByReference.size);
- }catch(e){console.error('[Planning couleurs] Lecture Seances impossible :',e)}
- render();
+function unwrapText(value){
+ if(value==null)return '';
+ let text=String(value).trim();
+ for(let i=0;i<2;i++){
+  if(!(text.startsWith('"')&&text.endsWith('"')))break;
+  try{const parsed=JSON.parse(text);if(typeof parsed!=='string')break;text=parsed.trim()}catch(e){break}
+ }
+ return text;
 }
-function enrichment(r){
- const matches=sessionsByReference.get(String(r.Reference??'').trim())||[];
- return matches.length===1?matches[0]:null;
+function validColor(value){const color=unwrapText(value);return /^#[0-9a-f]{6}$/i.test(color)?color:null}
+async function loadCategoryColors(){
+ try{
+  const sessions=tableRows(await grist.docApi.fetchTable('Seances'));
+  sessionsByReference=new Map();
+  sessionDetails=new Map();
+  for(const row of sessions){
+   const ref=unwrapText(row.Reference);
+   if(ref){if(!sessionsByReference.has(ref))sessionsByReference.set(ref,[]);sessionsByReference.get(ref).push(row)}
+   const sig=signature(row);
+   if(!sessionDetails.has(sig))sessionDetails.set(sig,[]);
+   sessionDetails.get(sig).push(row);
+  }
+ }catch(e){console.error('[Planning] Lecture Seances impossible :',e)}
+ render();
 }
 function colorFor(r){
  const direct=validColor(r.Cours_CatCours);
- if(direct)return {color:direct,label:''};
- const source=enrichment(r);
- return {color:validColor(source?.Cours_CatCours),label:''};
+ if(direct)return direct;
+ const matches=sessionsByReference.get(unwrapText(r.Reference))||[];
+ return matches.length===1?validColor(matches[0].Cours_CatCours):null;
+}
+function signature(r){
+ const start=asDate(r.Date_debut), end=asDate(r.Date_fin);
+ return [start?start.getTime():'',end?end.getTime():'',String(r.Libelle_calendrier||'').trim()].join('|');
+}
+function enrichment(r){
+ const matches=sessionDetails.get(signature(r))||[];
+ // Pas d'association ambiguë entre une synthèse et plusieurs séances sources.
+ return matches.length===1?matches[0]:null;
 }
 function groupFor(r){return String(r.Groupe_sans_vague||enrichment(r)?.Groupe_sans_vague||'')}
 function contrast(hex){const h=hex.replace('#','');if(!/^[0-9a-f]{6}$/i.test(h))return '#1d2733';const rgb=[0,2,4].map(i=>parseInt(h.slice(i,i+2),16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722>.45?'#1d2733':'#fff'}
@@ -94,7 +110,7 @@ function render(){
   for(const r of items){
    const card=document.createElement('article');card.className='event-card';
    const btn=document.createElement('button');btn.type='button';btn.className='event'+(r.id===selected?' selected':'');btn.dataset.rowid=String(r.id);
-   const t=String(r[F.type]||enrichment(r)?.[F.type]||'Autre');const category=colorFor(r);const bg=category.color||fallback[1];
+   const t=String(r[F.type]||enrichment(r)?.[F.type]||'Autre');const bg=colorFor(r)||fallback[1];
    card.style.setProperty('--accent',bg);card.style.setProperty('--bg',bg);card.style.setProperty('--fg',contrast(bg));
    const time=document.createElement('small');time.textContent=fmtTime.format(r._start)+(r._end?' – '+fmtTime.format(r._end):'');
    const top=document.createElement('div');top.className='event-top';
