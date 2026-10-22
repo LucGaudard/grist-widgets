@@ -96,7 +96,16 @@ function enrichment(r){
  // Pas d'association ambiguë entre une synthèse et plusieurs séances sources.
  return matches.length===1?matches[0]:null;
 }
-function categoryFor(r){const source=enrichment(r);const ref=r.Cours??source?.Cours;const id=typeof ref==='number'?ref:Number(ref);return courseCategories[id]||''}
+function categoryFor(r){
+ // Le cours est fourni directement par la source du widget (table ou synthèse).
+ // Ne jamais rapprocher les séances par date/libellé pour déterminer la couleur.
+ const ref=r.Cours;
+ if(ref===null||ref===undefined||ref==='')return '';
+ // Une synthèse peut fournir une liste : colorer seulement si elle désigne un cours unique.
+ const values=Array.isArray(ref)?(ref[0]==='L'?ref.slice(1):ref):[ref];
+ const ids=[...new Set(values.map(v=>Number(v)).filter(Number.isInteger))];
+ return ids.length===1?(courseCategories[ids[0]]||''):'';
+}
 function groupFor(r){return String(r.Groupe_sans_vague||enrichment(r)?.Groupe_sans_vague||'')}
 function contrast(hex){const h=hex.replace('#','');if(!/^[0-9a-f]{6}$/i.test(h))return '#1d2733';const rgb=[0,2,4].map(i=>parseInt(h.slice(i,i+2),16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722>.45?'#1d2733':'#fff'}
 function asDate(v){if(v==null||v==='')return null;if(v instanceof Date)return Number.isNaN(+v)?null:v;if(typeof v==='number')return new Date(v*1000);const d=new Date(v);return Number.isNaN(+d)?null:d}
