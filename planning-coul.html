@@ -34,74 +34,65 @@ const fmtTime=new Intl.DateTimeFormat('fr-FR',{hour:'2-digit',minute:'2-digit',t
 const fmtMonth=new Intl.DateTimeFormat('fr-FR',{month:'long',year:'numeric',timeZone:'Europe/Paris'});
 const fmtDay=new Intl.DateTimeFormat('fr-FR',{weekday:'short',timeZone:'Europe/Paris'});
 const fmtKey=new Intl.DateTimeFormat('en-CA',{year:'numeric',month:'2-digit',day:'2-digit',timeZone:'Europe/Paris'});
-let categoryColors={}, courseCategories={}, sessionDetails=new Map();
-let coursesById=new Map(), categoriesById=new Map();
+let coursesById=new Map(), coursesByName=new Map(), sessionsByReference=new Map();
 let colorError='';
 const fallback=['#697586','#e9edf2'];
 function tableRows(data){if(Array.isArray(data))return data;const ids=data?.id||[];return ids.map((id,i)=>Object.fromEntries(Object.entries(data).map(([k,v])=>[k,Array.isArray(v)?v[i]:v]).concat([['id',id]])))}
-async function loadCategoryColors(){
- const issues=[];
- let courses, categories, sessions;
- for(const [name, assign] of [
-  ['Cours',data=>courses=data],
-  ['Cours_Categories',data=>categories=data],
-  ['Seances',data=>sessions=data]
- ]){
-  try{const data=await grist.docApi.fetchTable(name);assign(data);console.info('[Planning] Table lue :',name,tableRows(data).length)}
-  catch(e){issues.push(name+' : '+(e?.message||String(e)));console.error('[Planning] Lecture impossible :',name,e)}
- }
- if(sessions){
-  sessionDetails=new Map();
-  for(const row of tableRows(sessions)){
-   const key=signature(row);
-   if(!sessionDetails.has(key))sessionDetails.set(key,[]);
-   sessionDetails.get(key).push(row);
-  }
- }
- categoriesById=new Map();
- if(categories){
-  for(const row of tableRows(categories)){
-   const color=String(row.Couleur||'').trim();
-   if(/^#[0-9a-f]{6}$/i.test(color))categoriesById.set(Number(row.id),color);
-  }
-  if(!categoriesById.size)issues.push('Aucune couleur hexadécimale valide dans Cours_Categories.Couleur');
- }
- categoryColors={};courseCategories={};coursesById=new Map();
- if(courses){
-  for(const course of tableRows(courses)){
-   const id=Number(course.id), categoryId=Number(course.Categorie_Cours);
-   coursesById.set(id,course);
-   const color=categoriesById.get(categoryId);
-   if(color)categoryColors[id]=color;
-  }
- }
- colorError=issues.join(' | ');
- render();
-}
-function signature(r){
- const start=asDate(r.Date_debut), end=asDate(r.Date_fin);
- return [start?start.getTime():'',end?end.getTime():'',String(r.Libelle_calendrier||'').trim()].join('|');
-}
-function enrichment(r){
- const matches=sessionDetails.get(signature(r))||[];
- // Pas d'association ambiguë entre une synthèse et plusieurs séances sources.
- return matches.length===1?matches[0]:null;
-}
+function normalized(v){return String(v??'').trim().normalize('NFC').toLocaleLowerCase('fr-FR')}
+function validColor(v){const color=String(v??'').trim();return /^#[0-9a-f]{6}$/i.test(color)?color:null}
 function refIds(ref){
  if(ref==null||ref==='')return [];
  const values=Array.isArray(ref)?(ref[0]==='L'?ref.slice(1):ref):[ref];
  return [...new Set(values.map(v=>Number(v)).filter(v=>Number.isInteger(v)&&v>0))];
 }
+async function loadCategoryColors(){
+ const issues=[];let courses,sessions;
+ for(const [name,assign] of [['Cours',v=>courses=v],['Seances',v=>sessions=v]]){
+  try{const data=await grist.docApi.fetchTable(name);assign(data);console.info('[Planning] Table lue :',name,tableRows(data).length)}
+  catch(e){issues.push(name+' : '+(e?.message||String(e)));console.error('[Planning] Lecture impossible :',name,e)}
+ }
+ coursesById=new Map();coursesByName=new Map();sessionsByReference=new Map();
+ if(courses){
+  for(const course of tableRows(courses)){
+   coursesById.set(Number(course.id),course);
+   const name=normalized(course.Nom_complet);
+   if(name){if(!coursesByName.has(name))coursesByName.set(name,[]);coursesByName.get(name).push(course)}
+  }
+ }
+ if(sessions){
+  for(const session of tableRows(sessions)){
+   const key=String(session.Reference??'').trim();
+   if(key){if(!sessionsByReference.has(key))sessionsByReference.set(key,[]);sessionsByReference.get(key).push(session)}
+  }
+ }
+ colorError=issues.join(' | ');
+ console.info('[Planning couleurs] Cours indexés :',coursesById.size,'; libellés :',coursesByName.size,'; références séances :',sessionsByReference.size);
+ render();
+}
+function enrichment(r){
+ const matches=sessionsByReference.get(String(r.Reference??'').trim())||[];
+ return matches.length===1?matches[0]:null;
+}
 function colorFor(r){
- // Une synthèse peut contenir plusieurs cours. Une couleur n'est appliquée
- // que lorsque tous les cours sont connus et partagent la même catégorie.
- const ids=refIds(r.Cours);
- if(!ids.length)return {color:null,label:''};
- const cats=ids.map(id=>Number(coursesById.get(id)?.Categorie_Cours));
- if(cats.some(id=>!Number.isInteger(id)||id<=0))return {color:null,label:''};
- const unique=[...new Set(cats)];
- if(unique.length!==1)return {color:null,label:''};
- return {color:categoriesById.get(unique[0])||null,label:''};
+ // Priorité à la référence unique de séance : elle permet de récupérer
+ // le véritable identifiant Cours depuis la table Seances.
+ const source=enrichment(r);
+ let courses=source?refIds(source.Cours).map(id=>coursesById.get(id)):[];
+ // Les widgets Grist peuvent fournir la valeur affichée de la référence.
+ // En secours, retrouver le cours par son Nom_complet, uniquement si unique.
+ if(!courses.length){
+  const displayed=String(r.Cours??'').trim();
+  const ids=refIds(r.Cours);
+  if(ids.length)courses=ids.map(id=>coursesById.get(id));
+  else if(displayed){
+   const matches=coursesByName.get(normalized(displayed))||[];
+   if(matches.length===1)courses=matches;
+  }
+ }
+ if(!courses.length||courses.some(c=>!c))return {color:null,label:''};
+ const colors=courses.map(c=>validColor(c.CatCours));
+ if(colors.some(c=>!c)||new Set(colors.map(c=>c.toLowerCase())).size!==1)return {color:null,label:''};
+ return {color:colors[0],label:''};
 }
 function groupFor(r){return String(r.Groupe_sans_vague||enrichment(r)?.Groupe_sans_vague||'')}
 function contrast(hex){const h=hex.replace('#','');if(!/^[0-9a-f]{6}$/i.test(h))return '#1d2733';const rgb=[0,2,4].map(i=>parseInt(h.slice(i,i+2),16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722>.45?'#1d2733':'#fff'}
